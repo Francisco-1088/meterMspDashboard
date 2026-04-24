@@ -1140,6 +1140,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Meter — Multi-Company Dashboard</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" crossorigin="">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" crossorigin="">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -1834,6 +1836,7 @@ body.light .meter-popup .leaflet-popup-content-wrapper{
   </div>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js" crossorigin=""></script>
 <script>
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CO_LABELS = {
@@ -2923,7 +2926,7 @@ function _makeMarker(ll, net) {
     </div>
   </div>`;
 
-  const marker = L.marker(ll, {icon});
+  const marker = L.marker(ll, {icon, _health: _netHealthLabel(net), _net: net, _dc: dc});
   marker.bindPopup(popup, {closeButton:false, className:'meter-popup', maxWidth:240});
   marker.on('mouseover', function(){ this.openPopup(); });
   marker.on('mouseout',  function(){ this.closePopup(); });
@@ -2940,6 +2943,104 @@ function _fitMap(map, bounds) {
 let _ovMap = null;
 let _ovMarkersLayer = null;
 
+// ── Marker cluster factory ────────────────────────────────────────────────────
+function _healthColor(h) {
+  return h==='poor'?'#f05252':h==='fair'?'#f59e0b':h==='good'?'#3ecf6e':'#8b8fa8';
+}
+
+function _makeClusterGroup() {
+  const group = L.markerClusterGroup({
+    showCoverageOnHover: false,
+    spiderfyOnMaxZoom: true,
+    zoomToBoundsOnClick: true,
+    maxClusterRadius: 55,
+    disableClusteringAtZoom: 17,
+    iconCreateFunction: function(cluster) {
+      const count = cluster.getChildCount();
+      // Aggregate health across children: if any child marker is red/yellow, reflect in cluster color
+      let worst = 'good';
+      const rank = {good:0, fair:1, poor:2, unknown:-1};
+      cluster.getAllChildMarkers().forEach(m => {
+        const h = m.options._health || 'unknown';
+        if(rank[h] > rank[worst]) worst = h;
+      });
+      const fill = _healthColor(worst);
+      const size = count < 10 ? 34 : count < 50 ? 42 : 50;
+      return L.divIcon({
+        html: `<div style="width:${size}px;height:${size}px;border-radius:50%;
+                 background:${fill};opacity:.92;border:3px solid #0f1117;
+                 display:flex;align-items:center;justify-content:center;
+                 font-family:inherit;font-weight:700;font-size:${count<10?13:count<100?12:11}px;
+                 color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.4)">
+                 ${count}</div>`,
+        className: 'meter-cluster',
+        iconSize: [size, size]
+      });
+    }
+  });
+
+  // ── Hover popup on clusters: list underlying networks with their status ───
+  group.on('clustermouseover', function(ev) {
+    const cluster = ev.layer;
+    const children = cluster.getAllChildMarkers();
+    // Sort: poor → fair → unknown → good, so issues surface first
+    const order = {poor:0, fair:1, unknown:2, good:3};
+    children.sort((a,b) => (order[a.options._health]??2) - (order[b.options._health]??2));
+
+    // Summary counts
+    let good=0, fair=0, poor=0, unk=0;
+    children.forEach(m => {
+      const h = m.options._health || 'unknown';
+      if(h==='good') good++; else if(h==='fair') fair++;
+      else if(h==='poor') poor++; else unk++;
+    });
+
+    // Truncate long lists
+    const MAX_ROWS = 12;
+    const shown = children.slice(0, MAX_ROWS);
+    const overflow = children.length - shown.length;
+
+    const rows = shown.map(m => {
+      const n  = m.options._net  || {};
+      const dc = m.options._dc   || {online:0, offline:0};
+      const h  = m.options._health || 'unknown';
+      return `<div style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:11px;
+                border-bottom:1px solid rgba(255,255,255,.04)">
+        <span style="width:8px;height:8px;border-radius:50%;background:${_healthColor(h)};flex-shrink:0"></span>
+        <span style="color:#fff;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px">${esc(n.label||'—')}</span>
+        <span style="color:#3ecf6e;font-size:10px">↑${dc.online||0}</span>
+        ${dc.offline?`<span style="color:#f05252;font-size:10px">↓${dc.offline}</span>`:''}
+      </div>`;
+    }).join('');
+
+    const summary = [
+      good ? `<span style="color:#3ecf6e">${good} good</span>` : null,
+      fair ? `<span style="color:#f59e0b">${fair} fair</span>` : null,
+      poor ? `<span style="color:#f05252">${poor} poor</span>` : null,
+      unk  ? `<span style="color:#8b8fa8">${unk} unknown</span>` : null,
+    ].filter(Boolean).join(' · ');
+
+    const html = `<div style="font-family:inherit;min-width:220px;max-width:260px">
+      <div style="font-weight:700;color:#fff;margin-bottom:2px;font-size:12px">
+        ${children.length} network${children.length!==1?'s':''}
+      </div>
+      <div style="font-size:10px;color:#8b8fa8;margin-bottom:8px">${summary}</div>
+      ${rows}
+      ${overflow>0?`<div style="padding-top:6px;font-size:10px;color:#8b8fa8;font-style:italic">… ${overflow} more — zoom in to see all</div>`:''}
+      <div style="padding-top:8px;font-size:10px;color:#555870;border-top:1px solid rgba(255,255,255,.06);margin-top:4px">
+        Click to zoom in
+      </div>
+    </div>`;
+
+    cluster.bindPopup(html, {closeButton:false, className:'meter-popup', maxWidth:280}).openPopup();
+  });
+  group.on('clustermouseout', function(ev) {
+    ev.layer.closePopup();
+  });
+
+  return group;
+}
+
 function initOvMap() {
   if(typeof L === 'undefined') {
     document.getElementById('ov-map-wrap').innerHTML =
@@ -2952,7 +3053,7 @@ function initOvMap() {
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
         attribution:'© <a href="https://www.openstreetmap.org/copyright">OSM</a>', maxZoom:18
       }).addTo(_ovMap);
-      _ovMarkersLayer = L.layerGroup().addTo(_ovMap);
+      _ovMarkersLayer = _makeClusterGroup().addTo(_ovMap);
     }
     requestAnimationFrame(()=>{ _ovMap.invalidateSize(); updateOvMap(ovCompany); });
   } catch(e) {
@@ -3012,7 +3113,7 @@ function onMapTabActivated() {
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
         attribution:'© <a href="https://www.openstreetmap.org/copyright">OSM</a>', maxZoom:18
       }).addTo(_mapTabInstance);
-      _mapTabLayer = L.layerGroup().addTo(_mapTabInstance);
+      _mapTabLayer = _makeClusterGroup().addTo(_mapTabInstance);
     }
     requestAnimationFrame(()=>{ _mapTabInstance.invalidateSize(); updateMapTab(); });
   } catch(e) {
