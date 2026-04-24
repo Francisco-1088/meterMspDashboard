@@ -1365,7 +1365,7 @@ tbody tr:hover td{background:var(--bg-card-hover)}
 .map-legend-item{display:flex;align-items:center;gap:5px}
 .map-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 .map-wrap{flex:1;min-height:400px;overflow:hidden}
-.ov-map-wrap{height:420px;border-radius:8px;overflow:hidden;
+.ov-map-wrap{height:calc(100vh - 150px);min-height:420px;border-radius:8px;overflow:hidden;
   border:1px solid var(--border);margin-top:4px}
 
 /* ── Leaflet popup dark theme ── */
